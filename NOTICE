@@ -1,0 +1,42 @@
+Der Gutachter
+Copyright (C) 2026 the Der Gutachter authors
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+See LICENSE. This program comes with ABSOLUTELY NO WARRANTY; see DISCLAIMER.md.
+
+Non-commercial research prototype. Not a medical device.
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+
+Bundled in the Windows application (installer):
+
+  PyMuPDF            AGPL-3.0 (or commercial licence from Artifex)
+                     https://github.com/pymupdf/PyMuPDF
+  Tesseract OCR      Apache-2.0      https://github.com/tesseract-ocr/tesseract
+    Windows build    UB Mannheim     https://github.com/UB-Mannheim/tesseract
+    tessdata         Apache-2.0      https://github.com/tesseract-ocr/tessdata
+  llama.cpp          MIT             https://github.com/ggml-org/llama.cpp
+  NVIDIA CUDA runtime (optional, downloaded only on NVIDIA systems)
+                     NVIDIA CUDA EULA (redistributable components)
+  Python             PSF-2.0         https://www.python.org
+  FastAPI            MIT             Uvicorn        BSD-3-Clause
+  Pydantic           MIT             Pillow         MIT-CMU
+  OpenCV (headless)  Apache-2.0      NumPy / SciPy  BSD-3-Clause
+  psutil             BSD-3-Clause    ImageHash      BSD-2-Clause
+  httpx              BSD-3-Clause    python-docx    MIT
+  pywebview          BSD-3-Clause    React          MIT
+  PyInstaller        GPL-2.0-or-later with bootloader exception
+  Inno Setup         Inno Setup licence (installer builder)
+
+Language models (NOT part of this project, NOT redistributed here; downloaded by
+the user from their publishers, under their own licences):
+
+  Gemma 4 12B (instruction-tuned, QAT Q4_0)     Apache-2.0
+    https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf
+
+The full licence texts of bundled components are included in the application
+directory of the installed program (their respective packages / folders).

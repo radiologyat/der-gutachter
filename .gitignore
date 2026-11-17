@@ -1,0 +1,40 @@
+# Patient data — NEVER commit
+cases/
+*.sqlite3
+*.db-journal
+
+# Model weights — downloaded by scripts/download_models.py
+models/
+
+# Test datasets — downloaded or generated, reproducible
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+logs/
+
+# Local test and evaluation material
+# stays local only — never in git. Public releases are cut as a clean snapshot.
+samples/
+
+# Belt and braces: no databases, backups or documents anywhere in the repo
+*.db
+*.db-wal
+*.db-shm
+backups/
+*.pdf

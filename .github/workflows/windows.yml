@@ -1,0 +1,180 @@
+# Windows build: tests, PyInstaller bundle with native runtime, headless smoke
+# test of the built app, Inno Setup installer.
+# Installer is uploaded only for tags (v*) and manual runs — private-repo artifact
+# storage is limited, and every branch push would add ~250 MB.
+name: windows
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Python deps
+        run: uv sync --group dev --group desktop --group build
+
+      - name: Build UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Cache native runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: build/runtime/cache
+          key: runtime-${{ hashFiles('packaging/fetch_runtime.py', 'scripts/download_models.py') }}
+
+      - name: Stage native runtime (llama.cpp Vulkan/CPU, Tesseract)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # authenticated API calls: no shared rate limit
+        run: uv run python packaging/fetch_runtime.py
+
+      - name: Tests (with the bundled Tesseract)
+        run: |
+          $env:TESSERACT_CMD = "$PWD\build\runtime\bin\tesseract\tesseract.exe"
+          $env:GUTACHTEN_TESSDATA = "$PWD\build\runtime\bin\tesseract\tessdata"
+          uv run pytest -q
+
+      - name: PyInstaller bundle
+        run: |
+          uv run pyinstaller packaging/gutachten.spec --noconfirm --log-level WARN
+          Copy-Item -Recurse build/runtime/bin dist/DerGutachter/bin
+          Copy-Item packaging/DerGutachter.exe.config dist/DerGutachter/DerGutachter.exe.config
+
+      - name: Native dependencies complete (no VC++ / DLL surprises on clean PCs)
+        run: uv run --with pefile python packaging/check_runtime_deps.py dist/DerGutachter/bin
+
+      # Self-signed code signing (free). Active only when the repo secrets
+      # SIGN_PFX_BASE64 / SIGN_PFX_PASSWORD exist; otherwise the build is unsigned.
+      - name: Prepare signing
+        id: sign
+        env:
+          PFX_B64: ${{ secrets.SIGN_PFX_BASE64 }}
+          PFX_PW: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) { "enabled=false" >> $env:GITHUB_OUTPUT; Write-Host "no signing secret - unsigned build"; exit 0 }
+          $pfx = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          # Wrapper without nested quoting: certificate + password come from the
+          # environment, the file name is the only argument (Inno passes $f quoted).
+          $cmd = "$env:RUNNER_TEMP\sign.cmd"
+          Set-Content -Path $cmd -Encoding ascii -Value @(
+            "@echo off",
+            "`"$($tool.FullName)`" sign /f `"%SIGN_PFX%`" /p %PFX_PW% /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d `"Der Gutachter`" %1"
+          )
+          "enabled=true" >> $env:GITHUB_OUTPUT
+          "cmd=$cmd" >> $env:GITHUB_OUTPUT
+          "SIGN_PFX=$pfx" >> $env:GITHUB_ENV
+
+      - name: Sign app executable
+        if: steps.sign.outputs.enabled == 'true'
+        env:
+          PFX_PW: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          & "${{ steps.sign.outputs.cmd }}" "dist\DerGutachter\DerGutachter.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+
+      - name: Smoke test (built app, headless)
+        run: |
+          # simulate a portable ZIP downloaded from the internet: Mark of the Web on all
+          # program files (made pythonnet fail on a real PC in 0.9.1)
+          # The main exe itself stays unmarked: Windows would show "Run this file?" for it,
+          # which nobody can click on a headless runner (users confirm it themselves).
+          # and run it from a folder with spaces and umlauts, like
+          # "C:\Users\Vorname Nachname\Downloads\…" on a real PC
+          $app = "$env:RUNNER_TEMP\Mein Ordner Ü\DerGutachter"
+          New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
+          Copy-Item -Recurse dist\DerGutachter $app
+          Get-ChildItem "$app\_internal" -Recurse -Include *.dll,*.pyd,*.exe |
+            ForEach-Object { Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" }
+          $env:GUTACHTEN_HOME = "$env:RUNNER_TEMP\Daten Bühler\smoke-home"
+          $p = Start-Process "$app\DerGutachter.exe" -ArgumentList "--smoke-test","$env:RUNNER_TEMP\smoke.json" -PassThru
+          # hard limit: a hanging dialog or process must fail the build, not block it
+          if (-not $p.WaitForExit(600000)) {
+            Stop-Process -Id $p.Id -Force
+            if (Test-Path "$env:GUTACHTEN_HOME\logs\app.log") { Get-Content "$env:GUTACHTEN_HOME\logs\app.log" -Tail 60 }
+            throw "smoke test timed out after 10 minutes"
+          }
+          Get-Content "$env:RUNNER_TEMP\smoke.json"
+          if ($p.ExitCode -ne 0) {
+            Get-Content "$env:GUTACHTEN_HOME\logs\app.log" -Tail 60
+            throw "smoke test failed ($($p.ExitCode))"
+          }
+
+      - name: Installer
+        env:
+          PFX_PW: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          uv run python packaging/make_installer_texts.py
+          choco install innosetup --no-progress -y
+          $v = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "0.0.0-${{ github.sha }}".Substring(0, 14) }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if ("${{ steps.sign.outputs.enabled }}" -eq "true") {
+            # $f is replaced by Inno with the quoted file name (installer + uninstaller)
+            & $iscc "/DAppVersion=$v" /DSIGN "/Ssigntool=${{ steps.sign.outputs.cmd }} `$f" packaging\installer.iss
+          } else {
+            & $iscc "/DAppVersion=$v" packaging\installer.iss
+          }
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem dist-installer | Format-Table Name, Length
+
+      - name: Verify signatures (trusting our public certificate, like the trust script)
+        if: steps.sign.outputs.enabled == 'true'
+        timeout-minutes: 5
+        run: |
+          # LocalMachine (runner is admin): CurrentUser\Root pops up a confirmation
+          # dialog that blocks a headless runner forever.
+          Import-Certificate -FilePath packaging\signing\DerGutachter-Codesigning.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          foreach ($f in @("dist\DerGutachter\DerGutachter.exe") + (Get-ChildItem dist-installer\*.exe).FullName) {
+            $s = Get-AuthenticodeSignature $f
+            Write-Host "$f : $($s.Status) $($s.SignerCertificate.Subject)"
+            if ($s.Status -ne "Valid") { throw "signature not valid: $f" }
+          }
+
+      - name: Portable ZIP + checksums
+        run: |
+          # "unzip and run" variant: the signed app folder itself, no installer
+          Copy-Item packaging\signing -Destination dist\DerGutachter\Zertifikat -Recurse -Force
+          Compress-Archive -Path dist\DerGutachter\* -DestinationPath dist-installer\DerGutachter-Portable.zip -CompressionLevel Optimal
+          Get-ChildItem dist-installer -File | Where-Object Name -ne SHA256SUMS.txt | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii dist-installer\SHA256SUMS.txt
+          Get-Content dist-installer\SHA256SUMS.txt
+
+      - name: Upload installer
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DerGutachter-Setup
+          path: |
+            dist-installer/*.exe
+            dist-installer/*.zip
+            dist-installer/SHA256SUMS.txt
+          retention-days: 5
+          compression-level: 0
